@@ -17,6 +17,7 @@ import (
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer"
+	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 // PlatformType represents the platform type for OpenAI API.
@@ -65,6 +66,16 @@ type Config struct {
 	// Use ReasoningFieldContent (default) for DeepSeek/Mimo/Gemini, ReasoningFieldReasoning for NanoGPT/OpenRouter,
 	// or ReasoningFieldNone to strip all reasoning fields.
 	ReasoningField ReasoningField `json:"reasoning_field,omitempty"`
+
+	// SessionAffinity sends the resolved session ID as both prompt_cache_key and
+	// x-session-affinity. OpenCode Go uses these values to keep a conversation on
+	// the same cache shard.
+	SessionAffinity bool `json:"session_affinity,omitempty"`
+
+	// StabilizeCachePrefix removes volatile Claude Code billing metadata and
+	// keeps historical system reminders in conversation order. Prefix-cached
+	// OpenAI-compatible providers otherwise treat each turn as a new prompt.
+	StabilizeCachePrefix bool `json:"stabilize_cache_prefix,omitempty"`
 
 	// ReasoningEffortMapping maps inbound reasoning_effort values to outbound ones for
 	// non-standard OpenAI-compatible providers. The first entry whose From matches the
@@ -197,6 +208,18 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 
 	// Convert to OpenAI Request format (this strips helper fields)
 	oaiReq := RequestFromLLM(llmReq, reasoningField)
+	if t.config.StabilizeCachePrefix {
+		stabilizeCachePrefix(oaiReq)
+	}
+	sessionID := ""
+	if t.config.SessionAffinity {
+		if value, ok := shared.GetSessionID(ctx); ok {
+			sessionID = strings.TrimSpace(value)
+			if sessionID != "" && (oaiReq.PromptCacheKey == nil || strings.TrimSpace(*oaiReq.PromptCacheKey) == "") {
+				oaiReq.PromptCacheKey = &sessionID
+			}
+		}
+	}
 	// Apply per-channel reasoning_effort mapping for non-standard OpenAI-compatible providers.
 	// Entries in the map replace the effort value; values not in the map pass through unchanged.
 	// e.g. ollama channel with {"xhigh": "max"} converts Anthropic's internal "xhigh" back to "max".
@@ -219,6 +242,9 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Accept", "application/json")
+	if sessionID != "" {
+		headers.Set("x-session-affinity", sessionID)
+	}
 
 	authConfig := &httpclient.AuthConfig{
 		Type:   "bearer",

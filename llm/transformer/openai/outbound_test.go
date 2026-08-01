@@ -14,7 +14,86 @@ import (
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/auth"
 	"github.com/looplj/axonhub/llm/httpclient"
+	"github.com/looplj/axonhub/llm/transformer/shared"
 )
+
+func TestOutboundTransformer_TransformRequest_SessionAffinity(t *testing.T) {
+	newRequest := func(promptCacheKey *string) *llm.Request {
+		return &llm.Request{
+			Model:          "deepseek-v4-flash",
+			PromptCacheKey: promptCacheKey,
+			Messages: []llm.Message{{
+				Role: "user",
+				Content: llm.MessageContent{
+					Content: lo.ToPtr("Hello"),
+				},
+			}},
+		}
+	}
+
+	tests := []struct {
+		name               string
+		enabled            bool
+		sessionID          string
+		explicitCacheKey   *string
+		expectedCacheKey   string
+		expectedAffinityID string
+	}{
+		{
+			name:               "uses session ID as cache key",
+			enabled:            true,
+			sessionID:          "session-123",
+			expectedCacheKey:   "session-123",
+			expectedAffinityID: "session-123",
+		},
+		{
+			name:               "preserves explicit cache key",
+			enabled:            true,
+			sessionID:          "session-123",
+			explicitCacheKey:   lo.ToPtr("explicit-key"),
+			expectedCacheKey:   "explicit-key",
+			expectedAffinityID: "session-123",
+		},
+		{
+			name:      "disabled",
+			enabled:   false,
+			sessionID: "session-123",
+		},
+		{
+			name:    "missing session ID",
+			enabled: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outbound, err := NewOutboundTransformerWithConfig(&Config{
+				PlatformType:    PlatformOpenAI,
+				BaseURL:         "https://opencode.ai/zen/go/v1",
+				APIKeyProvider:  auth.NewStaticKeyProvider("test-key"),
+				SessionAffinity: tt.enabled,
+			})
+			assert.NoError(t, err)
+
+			ctx := t.Context()
+			if tt.sessionID != "" {
+				ctx = shared.WithSessionID(ctx, tt.sessionID)
+			}
+
+			result, err := outbound.TransformRequest(ctx, newRequest(tt.explicitCacheKey))
+			assert.NoError(t, err)
+
+			var payload Request
+			assert.NoError(t, json.Unmarshal(result.Body, &payload))
+			if tt.expectedCacheKey == "" {
+				assert.Nil(t, payload.PromptCacheKey)
+			} else {
+				assert.Equal(t, tt.expectedCacheKey, lo.FromPtr(payload.PromptCacheKey))
+			}
+			assert.Equal(t, tt.expectedAffinityID, result.Headers.Get("x-session-affinity"))
+		})
+	}
+}
 
 func TestOutboundTransformer_TransformRequest(t *testing.T) {
 	// Helper function to create transformer

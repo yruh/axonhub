@@ -370,10 +370,12 @@ func (svc *ChannelService) buildNonDefaultEndpointOutbound(
 		}
 
 		return openai.NewOutboundTransformerWithConfig(&openai.Config{
-			PlatformType:   openai.PlatformOpenAI,
-			BaseURL:        baseURL,
-			APIKeyProvider: apiKeyProvider(),
-			EndpointPath:   ep.Path,
+			PlatformType:         openai.PlatformOpenAI,
+			BaseURL:              baseURL,
+			APIKeyProvider:       apiKeyProvider(),
+			EndpointPath:         ep.Path,
+			SessionAffinity:      c.Type == channel.TypeOpencodeGo,
+			StabilizeCachePrefix: c.Type == channel.TypeOpencodeGo,
 		})
 	case llm.APIFormatOpenAICompletion.String():
 		return openai.NewCompletionOutboundTransformer(&openai.Config{
@@ -992,6 +994,8 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel, apiKeyOve
 			BaseURL:                c.BaseURL,
 			APIKeyProvider:         getAPIKeyProvider(ch),
 			ReasoningEffortMapping: reasoningEffortMapping,
+			SessionAffinity:        c.Type == channel.TypeOpencodeGo,
+			StabilizeCachePrefix:   c.Type == channel.TypeOpencodeGo,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create outbound transformer: %w", err)

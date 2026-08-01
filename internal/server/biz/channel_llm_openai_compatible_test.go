@@ -2,10 +2,12 @@ package biz
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 
 	"github.com/looplj/axonhub/internal/authz"
@@ -20,7 +22,60 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/openai"
 	"github.com/looplj/axonhub/llm/transformer/openai/codex"
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
+	"github.com/looplj/axonhub/llm/transformer/shared"
 )
+
+func TestOpenCodeGoChannel_EnablesSessionAffinity(t *testing.T) {
+	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
+	defer client.Close()
+
+	ctx := authz.WithTestBypass(context.Background())
+	entChannel := client.Channel.Create().
+		SetName("OpenCode Go Channel").
+		SetType(channel.TypeOpencodeGo).
+		SetBaseURL("https://opencode.ai/zen/go/v1").
+		SetCredentials(objects.ChannelCredentials{APIKey: "test-key"}).
+		SetSupportedModels([]string{"deepseek-v4-flash"}).
+		SetDefaultTestModel("deepseek-v4-flash").
+		SetEndpoints([]objects.ChannelEndpoint{{
+			APIFormat: llm.APIFormatOpenAIChatCompletion.String(),
+			Path:      "/custom/chat/completions",
+		}}).
+		SaveX(ctx)
+
+	built, err := NewChannelServiceForTest(client).buildChannelWithOutbounds(entChannel)
+	require.NoError(t, err)
+	outbound, err := BuildOutboundByAPIFormat(built, llm.APIFormatOpenAIChatCompletion.String())
+	require.NoError(t, err)
+
+	requestCtx := shared.WithSessionID(t.Context(), "opencode-session-123")
+	transformed, err := outbound.TransformRequest(requestCtx, &llm.Request{
+		Model: "deepseek-v4-flash",
+		Messages: []llm.Message{
+			{
+				Role: "system",
+				Content: llm.MessageContent{Content: lo.ToPtr(
+					"x-anthropic-billing-header: cc_version=2.1; cch=abc12;",
+				)},
+			},
+			{Role: "system", Content: llm.MessageContent{Content: lo.ToPtr("Stable prompt")}},
+			{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("Hello")}},
+			{Role: "system", Content: llm.MessageContent{Content: lo.ToPtr("Reminder")}},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "opencode-session-123", transformed.Headers.Get("x-session-affinity"))
+
+	var payload openai.Request
+	require.NoError(t, json.Unmarshal(transformed.Body, &payload))
+	require.Equal(t, "opencode-session-123", lo.FromPtr(payload.PromptCacheKey))
+	require.Len(t, payload.Messages, 3)
+	require.Equal(t, []string{"system", "user", "user"}, []string{
+		payload.Messages[0].Role,
+		payload.Messages[1].Role,
+		payload.Messages[2].Role,
+	})
+}
 
 func TestOpenAICompatibleChannel_BuildChannelWithOutbounds(t *testing.T) {
 	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
